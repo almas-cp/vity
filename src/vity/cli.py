@@ -231,13 +231,17 @@ For shell integration, run: vity install
                         history_file = Path.home() / ".bash_history"
                     
                     try:
-                        with open(history_file, "a") as f:
+                        with open(history_file, "a", encoding="utf-8") as f:
                             if "zsh" in shell:
-                                # ZSH extended history format
+                                # ZSH extended history format: : timestamp:elapsed;command
                                 import time
-                                f.write(f": {int(time.time())}:0;{cmd_string}\n")
+                                # Remove any newlines from the command to keep it on one line
+                                clean_cmd = cmd_string.replace("\n", " ")
+                                f.write(f": {int(time.time())}:0;{clean_cmd}\n")
                             else:
                                 f.write(f"{cmd_string}\n")
+                        # Force flush to ensure it's written
+                        os.sync() if hasattr(os, 'sync') else None
                     except (IOError, OSError):
                         pass  # Silently fail if we can't write to history file
 
@@ -280,6 +284,14 @@ def _get_shell_script_content():
     """Return the shell integration script content (works for both bash and zsh)"""
     return '''
 # Vity shell integration
+
+# For ZSH: Ensure history options are set correctly
+if [[ -n "$ZSH_VERSION" ]]; then
+    setopt APPEND_HISTORY
+    setopt INC_APPEND_HISTORY
+    setopt SHARE_HISTORY
+fi
+
 vity() {
     if [[ "$1" == "record" ]]; then
         shift
@@ -327,8 +339,10 @@ vity() {
         # Inject into shell's live in-memory history so up-arrow works immediately
         if [[ -n "$_vity_cmd" ]]; then
             if [[ -n "$ZSH_VERSION" ]]; then
-                # ZSH: print -s adds directly to the in-memory history
+                # ZSH: Use fc -R to reload history and print -s to add to current session
                 print -s "$_vity_cmd"
+                # Also ensure it's written to history file immediately
+                fc -W
             else
                 # Bash: history -s adds directly to the in-memory history
                 history -s "$_vity_cmd"
