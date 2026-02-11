@@ -323,30 +323,33 @@ vity() {
             _vity_output=$(command vity do "$@" 2>&1)
         fi
         
+        # Extract command from the __VITY_CMD__ marker FIRST
+        local _vity_cmd=$(echo "$_vity_output" | grep '^__VITY_CMD__:' | head -1 | sed 's/^__VITY_CMD__://')
+        
         # Print all output lines EXCEPT the __VITY_CMD__ marker
-        local _vity_cmd=""
-        echo "$_vity_output" | while IFS= read -r line; do
-            if [[ "$line" == __VITY_CMD__:* ]]; then
-                : # skip marker line in display output
-            else
+        while IFS= read -r line; do
+            if [[ "$line" != __VITY_CMD__:* ]]; then
                 echo "$line"
             fi
-        done
-        
-        # Extract command from the __VITY_CMD__ marker
-        _vity_cmd=$(echo "$_vity_output" | grep '^__VITY_CMD__:' | head -1 | sed 's/^__VITY_CMD__://')
+        done <<< "$_vity_output"
         
         # Inject into shell's live in-memory history so up-arrow works immediately
         if [[ -n "$_vity_cmd" ]]; then
             if [[ -n "$ZSH_VERSION" ]]; then
-                # ZSH: Use fc -R to reload history and print -s to add to current session
+                # ZSH: Use print -s to add to history
                 print -s "$_vity_cmd"
-                # Also ensure it's written to history file immediately
-                fc -W
+                # Debug: uncomment to verify
+                # echo "[DEBUG] Added to zsh history: $_vity_cmd" >&2
             else
                 # Bash: history -s adds directly to the in-memory history
                 history -s "$_vity_cmd"
+                # Debug: uncomment to verify
+                # echo "[DEBUG] Added to bash history: $_vity_cmd" >&2
             fi
+        else
+            # Debug: uncomment to see if command extraction failed
+            # echo "[DEBUG] No command extracted from output" >&2
+            :
         fi
         
     elif [[ "$1" == "chat" ]]; then
