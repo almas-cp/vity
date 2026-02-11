@@ -128,7 +128,11 @@ pipx install vity
 fi
 
 # Reload shell configuration to pick up PATH changes
-source ~/.bashrc 2>/dev/null || true
+if [ -f ~/.zshrc ]; then
+    source ~/.zshrc 2>/dev/null || true
+elif [ -f ~/.bashrc ]; then
+    source ~/.bashrc 2>/dev/null || true
+fi
 
 # Install or update shell integration
 printf "${YELLOW}🔧 Setting up shell integration...${NC}\n"

@@ -219,11 +219,27 @@ For shell integration, run: vity install
                         cmd_string = content
                     print(f"Command: {cmd_string}")
                     
-                    # Add to bash history
-                    history_file = Path.home() / ".bash_history"
-                    if history_file.exists():
+                    # Output special marker for the shell wrapper to inject into live history
+                    # The shell wrapper will parse this and use shell-native history injection
+                    print(f"__VITY_CMD__:{cmd_string}")
+                    
+                    # Also write to the appropriate history file on disk as a fallback
+                    shell = os.environ.get("SHELL", "/bin/bash")
+                    if "zsh" in shell:
+                        history_file = Path.home() / ".zsh_history"
+                    else:
+                        history_file = Path.home() / ".bash_history"
+                    
+                    try:
                         with open(history_file, "a") as f:
-                            f.write(f"{cmd_string} # Vity generated\n")
+                            if "zsh" in shell:
+                                # ZSH extended history format
+                                import time
+                                f.write(f": {int(time.time())}:0;{cmd_string}\n")
+                            else:
+                                f.write(f"{cmd_string}\n")
+                    except (IOError, OSError):
+                        pass  # Silently fail if we can't write to history file
 
                 
                 # Save updated chat history
@@ -260,9 +276,9 @@ For shell integration, run: vity install
             sys.exit(1)
 
 
-def install_shell_integration():
-    """Install shell integration"""
-    script_content = '''
+def _get_shell_script_content():
+    """Return the shell integration script content (works for both bash and zsh)"""
+    return '''
 # Vity shell integration
 vity() {
     if [[ "$1" == "record" ]]; then
@@ -287,11 +303,36 @@ vity() {
         
     elif [[ "$1" == "do" ]]; then
         shift
+        local _vity_output
         if [[ -n "$VITY_ACTIVE_LOG" && -f "$VITY_ACTIVE_LOG" ]]; then
-            command vity -f "$VITY_ACTIVE_LOG" -c "$VITY_ACTIVE_CHAT" do "$@"
+            _vity_output=$(command vity -f "$VITY_ACTIVE_LOG" -c "$VITY_ACTIVE_CHAT" do "$@" 2>&1)
         else
             echo "⚠️  No active recording. Use 'vity record' for context."
-            command vity do "$@"
+            _vity_output=$(command vity do "$@" 2>&1)
+        fi
+        
+        # Print all output lines EXCEPT the __VITY_CMD__ marker
+        local _vity_cmd=""
+        echo "$_vity_output" | while IFS= read -r line; do
+            if [[ "$line" == __VITY_CMD__:* ]]; then
+                : # skip marker line in display output
+            else
+                echo "$line"
+            fi
+        done
+        
+        # Extract command from the __VITY_CMD__ marker
+        _vity_cmd=$(echo "$_vity_output" | grep '^__VITY_CMD__:' | head -1 | sed 's/^__VITY_CMD__://')
+        
+        # Inject into shell's live in-memory history so up-arrow works immediately
+        if [[ -n "$_vity_cmd" ]]; then
+            if [[ -n "$ZSH_VERSION" ]]; then
+                # ZSH: print -s adds directly to the in-memory history
+                print -s "$_vity_cmd"
+            else
+                # Bash: history -s adds directly to the in-memory history
+                history -s "$_vity_cmd"
+            fi
         fi
         
     elif [[ "$1" == "chat" ]]; then
@@ -377,56 +418,57 @@ EOF
         echo ""
         echo "Run 'vity help' for more details and examples."
     fi
-    
-    history -n 2>/dev/null || true
 }
 '''
+
+
+def install_shell_integration():
+    """Install shell integration for both bash and zsh"""
+    script_content = _get_shell_script_content()
+    installed = False
     
+    # Install for Bash
     bashrc = Path.home() / ".bashrc"
     if bashrc.exists():
         content = bashrc.read_text()
         if "# Vity shell integration" not in content:
             with open(bashrc, "a") as f:
                 f.write(f"\n{script_content}")
-            print("✅ Shell integration installed!")
-            print("Run 'source ~/.bashrc' or start a new terminal session")
+            print("✅ Shell integration installed in ~/.bashrc")
+            installed = True
         else:
-            print("✅ Shell integration already installed")
+            print("✅ Shell integration already installed in ~/.bashrc")
+            installed = True
+    
+    # Install for ZSH
+    zshrc = Path.home() / ".zshrc"
+    if zshrc.exists():
+        content = zshrc.read_text()
+        if "# Vity shell integration" not in content:
+            with open(zshrc, "a") as f:
+                f.write(f"\n{script_content}")
+            print("✅ Shell integration installed in ~/.zshrc")
+            installed = True
+        else:
+            print("✅ Shell integration already installed in ~/.zshrc")
+            installed = True
+    
+    if installed:
+        shell = os.environ.get("SHELL", "/bin/bash")
+        if "zsh" in shell:
+            print("Run 'source ~/.zshrc' or start a new terminal session")
+        else:
+            print("Run 'source ~/.bashrc' or start a new terminal session")
     else:
-        print("❌ ~/.bashrc not found")
+        print("❌ Neither ~/.bashrc nor ~/.zshrc found")
 
 
 def reinstall_shell_integration():
     """Reinstall shell integration (remove existing and install fresh)"""
-    bashrc = Path.home() / ".bashrc"
-    
-    if not bashrc.exists():
-        print("❌ ~/.bashrc not found")
-        return
-    
     print("🔄 Reinstalling shell integration...")
     
-    # Read the current bashrc content
-    content = bashrc.read_text()
-    
-    # Find and remove existing vity shell integration
-    lines = content.split('\n')
-    new_lines = []
-    in_vity_section = False
-    
-    for line in lines:
-        if line.strip() == "# Vity shell integration":
-            in_vity_section = True
-            print("🗑️  Removing existing shell integration...")
-            continue
-        elif in_vity_section and line.strip() == "}":
-            in_vity_section = False
-            continue
-        elif not in_vity_section:
-            new_lines.append(line)
-    
-    # Write the cleaned content back
-    bashrc.write_text('\n'.join(new_lines))
+    # Remove existing shell integration from all shells
+    remove_shell_integration()
     
     # Install fresh shell integration
     print("✨ Installing fresh shell integration...")
@@ -473,37 +515,34 @@ def uninstall_shell_integration(force: bool = False):
 
 
 def remove_shell_integration():
-    """Remove vity function from ~/.bashrc"""
-    bashrc = Path.home() / ".bashrc"
-    
-    if not bashrc.exists():
-        print("ℹ️  ~/.bashrc not found, skipping shell integration removal")
-        return
-    
-    content = bashrc.read_text()
-    
-    if "# Vity shell integration" not in content:
-        print("ℹ️  Shell integration not found in ~/.bashrc")
-        return
-    
-    # Remove the entire vity function
-    lines = content.split('\n')
-    new_lines = []
-    in_vity_section = False
-    
-    for line in lines:
-        if line.strip() == "# Vity shell integration":
-            in_vity_section = True
-            print("🗑️  Removing shell integration from ~/.bashrc")
+    """Remove vity function from ~/.bashrc and ~/.zshrc"""
+    for rc_name, rc_path in [("~/.bashrc", Path.home() / ".bashrc"), ("~/.zshrc", Path.home() / ".zshrc")]:
+        if not rc_path.exists():
             continue
-        elif in_vity_section and line.strip() == "}":
-            in_vity_section = False
+        
+        content = rc_path.read_text()
+        
+        if "# Vity shell integration" not in content:
             continue
-        elif not in_vity_section:
-            new_lines.append(line)
-    
-    bashrc.write_text('\n'.join(new_lines))
-    print("✅ Shell integration removed")
+        
+        # Remove the entire vity function
+        lines = content.split('\n')
+        new_lines = []
+        in_vity_section = False
+        
+        for line in lines:
+            if line.strip() == "# Vity shell integration":
+                in_vity_section = True
+                print(f"🗑️  Removing shell integration from {rc_name}")
+                continue
+            elif in_vity_section and line.strip() == "}":
+                in_vity_section = False
+                continue
+            elif not in_vity_section:
+                new_lines.append(line)
+        
+        rc_path.write_text('\n'.join(new_lines))
+        print(f"✅ Shell integration removed from {rc_name}")
 
 
 def remove_configuration():
@@ -531,26 +570,34 @@ def remove_data_files():
 
 
 def clean_bash_history():
-    """Remove vity-generated commands from bash history"""
-    history_file = Path.home() / ".bash_history"
+    """Remove vity-generated commands from bash and zsh history"""
+    history_files = [
+        ("bash", Path.home() / ".bash_history"),
+        ("zsh", Path.home() / ".zsh_history"),
+    ]
     
-    if not history_file.exists():
-        print("ℹ️  ~/.bash_history not found")
-        return
-    
-    try:
-        lines = history_file.read_text().splitlines()
-        original_count = len(lines)
-        cleaned_lines = [line for line in lines if not line.endswith("# Vity generated")]
-        removed_count = original_count - len(cleaned_lines)
+    found_any = False
+    for shell_name, history_file in history_files:
+        if not history_file.exists():
+            continue
+        found_any = True
         
-        if removed_count > 0:
-            history_file.write_text('\n'.join(cleaned_lines) + '\n')
-            print(f"✅ Cleaned {removed_count} vity entries from bash history")
-        else:
-            print("ℹ️  No vity entries found in bash history")
-    except Exception as e:
-        print(f"⚠️  Could not clean bash history: {e}")
+        try:
+            lines = history_file.read_text().splitlines()
+            original_count = len(lines)
+            cleaned_lines = [line for line in lines if not line.endswith("# Vity generated")]
+            removed_count = original_count - len(cleaned_lines)
+            
+            if removed_count > 0:
+                history_file.write_text('\n'.join(cleaned_lines) + '\n')
+                print(f"✅ Cleaned {removed_count} vity entries from {shell_name} history")
+            else:
+                print(f"ℹ️  No vity entries found in {shell_name} history")
+        except Exception as e:
+            print(f"⚠️  Could not clean {shell_name} history: {e}")
+    
+    if not found_any:
+        print("ℹ️  No history files found")
 
 
 def remove_package():
